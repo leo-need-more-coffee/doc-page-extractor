@@ -2,21 +2,25 @@ import os
 import numpy as np
 
 from typing import Literal, Generator
+from math import pi
 from pathlib import Path
-from PIL import Image
+from PIL.ImageFile import ImageFile
 from transformers import LayoutLMv3ForTokenClassification
 from doclayout_yolo import YOLOv10
 from paddleocr import PaddleOCR
 
 from .layoutreader import prepare_inputs, boxes2inputs, parse_logits
+from .rotation import calculate_rotation, RotationAdjuster
 from .rectangle import intersection_area, Rectangle
-from .types import OCRFragment, LayoutClass, Layout
+from .types import ExtractedResult, OCRFragment, LayoutClass, Layout
 from .downloader import download
 from .utils import ensure_dir
 
 
 # https://github.com/PaddlePaddle/PaddleOCR/blob/2c0c4beb0606819735a16083cdebf652939c781a/paddleocr.py#L108-L157
 type PaddleLang = Literal["ch", "en", "korean", "japan", "chinese_cht", "ta", "te", "ka", "latin", "arabic", "cyrillic", "devanagari"]
+
+_TINY_ROTATION = 0.005 # below this angle, we consider the text is horizontal
 
 class DocExtractor:
   def __init__(
@@ -30,15 +34,47 @@ class DocExtractor:
     self._yolo: YOLOv10 | None = None
     self._layout: LayoutLMv3ForTokenClassification | None = None
 
-  def extract(self, image: Image, lang: PaddleLang) -> list[Layout]:
+  def extract(
+      self,
+      image: ImageFile,
+      lang: PaddleLang,
+      adjust_points: bool = False,
+    ) -> ExtractedResult:
+
     image_np = np.array(image)
     fragments = list(self._search_orc_fragments(image_np, lang))
-    #TODO: 矫正角度
+    rotation = calculate_rotation(fragments)
+
+    fragment_origin_rectangles: list[Rectangle] | None = None
+    to_origin_adjuster: RotationAdjuster | None = None
+    to_new_adjuster: RotationAdjuster | None = None
+    adjusted_image: ImageFile | None = None
+
+    if abs(rotation) > _TINY_ROTATION:
+      to_origin_adjuster, to_new_adjuster, image = self._create_adjusters(image, rotation)
+      if adjust_points:
+        adjusted_image = image
+
+    if to_new_adjuster is not None:
+      fragment_origin_rectangles = [f.rect for f in fragments]
+      self._adjust_fragment_rectangles(fragments, to_new_adjuster)
+
     self._order_fragments(image.width, image.height, fragments)
     layouts = self._get_layouts(image)
     layouts = self._layouts_matched_by_fragments(fragments, layouts)
 
-    return layouts
+    if not adjust_points:
+      if fragment_origin_rectangles is not None:
+        for fragment, origin_rect in zip(fragments, fragment_origin_rectangles):
+          fragment.rect = origin_rect
+      if to_origin_adjuster is not None:
+        self._adjust_layout_rectangles(layouts, to_origin_adjuster)
+
+    return ExtractedResult(
+      rotation=rotation,
+      layouts=layouts,
+      adjusted_image=adjusted_image,
+    )
 
   # https://paddlepaddle.github.io/PaddleOCR/latest/quick_start.html#_2
   def _search_orc_fragments(self, image: np.ndarray, lang: PaddleLang) -> Generator[OCRFragment, None, None]:
@@ -59,6 +95,46 @@ class DocExtractor:
             lb=(react[3][0], react[3][1]),
           ),
         )
+
+  def _create_adjusters(self, image: ImageFile, rotation: float):
+    origin_size = image.size
+    image = image.rotate(
+      angle=rotation * 180 / pi,
+      fillcolor=(255, 255, 255),
+      expand=True,
+    )
+    to_origin_adjuster = RotationAdjuster(
+      origin_size=origin_size,
+      new_size=image.size,
+      rotation=rotation,
+      to_origin_coordinate=True,
+    )
+    to_new_adjuster = RotationAdjuster(
+      origin_size=origin_size,
+      new_size=image.size,
+      rotation=rotation,
+      to_origin_coordinate=False,
+    )
+    return to_origin_adjuster, to_new_adjuster, image
+
+  def _adjust_fragment_rectangles(self, fragments: list[OCRFragment], adjuster = RotationAdjuster) -> ImageFile:
+    for fragment in fragments:
+      rect = fragment.rect
+      fragment.rect = Rectangle(
+        lt=adjuster.adjust(rect.lt),
+        rt=adjuster.adjust(rect.rt),
+        lb=adjuster.adjust(rect.lb),
+        rb=adjuster.adjust(rect.rb),
+      )
+
+  def _adjust_layout_rectangles(self, layouts: list[Layout], adjuster = RotationAdjuster) -> ImageFile:
+    for layout in layouts:
+      layout.rect = Rectangle(
+        lt=adjuster.adjust(layout.rect.lt),
+        rt=adjuster.adjust(layout.rect.rt),
+        lb=adjuster.adjust(layout.rect.lb),
+        rb=adjuster.adjust(layout.rect.rb),
+      )
 
   def _order_fragments(self, width: int, height: int, fragments: list[OCRFragment]):
     if self._layout is None:
@@ -96,7 +172,7 @@ class DocExtractor:
     for order, fragment in zip(orders, fragments):
       fragment.order = order
 
-  def _get_layouts(self, source: Image) -> list[Layout]:
+  def _get_layouts(self, source: ImageFile) -> list[Layout]:
     # about source parameter to see:
     # https://github.com/opendatalab/DocLayout-YOLO/blob/7c4be36bc61f11b67cf4a44ee47f3c41e9800a91/doclayout_yolo/data/build.py#L157-L175
     det_res = self._get_yolo().predict(
@@ -110,32 +186,29 @@ class DocExtractor:
 
     for cls_id, rect in zip(boxes.cls, boxes.xyxy):
       cls_id = cls_id.item()
-      origin = (rect[0].item(), rect[1].item())
-      size = (rect[2].item() - origin[0], rect[3].item() - origin[1])
-      layouts.append(Layout(
-        cls=LayoutClass(round(cls_id)),
-        origin=origin,
-        size=size,
-        fragments=[],
-      ))
+      cls=LayoutClass(round(cls_id))
+
+      x1, y1, x2, y2 = rect
+      x1 = x1.item()
+      y1 = y1.item()
+      x2 = x2.item()
+      y2 = y2.item()
+      rect = Rectangle(
+        lt=(x1, y1),
+        rt=(x2, y1),
+        lb=(x1, y2),
+        rb=(x2, y2),
+      )
+      layouts.append(Layout(cls, rect, []))
+
     return layouts
 
   def _layouts_matched_by_fragments(self, fragments: list[OCRFragment], layouts: list[Layout]):
-    layout_rectangles: list[Rectangle] = []
-    for layout in layouts:
-      x0, y0 = layout.origin
-      width, height = layout.size
-      layout_rectangles.append(Rectangle(
-        lt=(x0, y0),
-        rt=(x0 + width, y0),
-        rb=(x0 + width, y0 + height),
-        lb=(x0, y0 + height),
-      ))
     for fragment in fragments:
       max_area: float = 0.0
       max_layout_index: int = 0
-      for i, layout_rect in enumerate(layout_rectangles):
-        area = intersection_area(fragment.rect, layout_rect)
+      for i, layout in enumerate(layouts):
+        area = intersection_area(fragment.rect, layout.rect)
         if area > max_area:
           max_area = area
           max_layout_index = i
@@ -209,12 +282,11 @@ class DocExtractor:
   def _get_boxes(self, fragments: list[OCRFragment]):
     boxes: list[tuple[float, float, float, float]] = []
     for fragment in fragments:
-      react = fragment.rect
       left: float = float("inf")
       top: float = float("inf")
       right: float = float("-inf")
       bottom: float = float("-inf")
-      for x, y in (react.lt, react.rt, react.lb, react.rb):
+      for x, y in fragment.rect:
         left = min(left, x)
         top = min(top, y)
         right = max(right, x)

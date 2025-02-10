@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum
+from PIL.ImageFile import ImageFile
 from .rectangle import Rectangle
 
 @dataclass
@@ -24,6 +25,11 @@ class LayoutClass(Enum):
 @dataclass
 class Layout:
   cls: LayoutClass
-  origin: tuple[float, float]
-  size: tuple[float, float]
+  rect: Rectangle
   fragments: list[OCRFragment]
+
+@dataclass
+class ExtractedResult:
+  rotation: float
+  layouts: list[Layout]
+  adjusted_image: ImageFile | None
