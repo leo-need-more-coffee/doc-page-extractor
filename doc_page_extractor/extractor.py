@@ -1,9 +1,10 @@
 import os
+import sys
 import numpy as np
 
 from typing import Literal, Generator
 from pathlib import Path
-from PIL.ImageFile import ImageFile
+from PIL.Image import Image
 from transformers import LayoutLMv3ForTokenClassification
 from doclayout_yolo import YOLOv10
 from paddleocr import PaddleOCR
@@ -33,7 +34,7 @@ class DocExtractor:
 
   def extract(
       self,
-      image: ImageFile,
+      image: Image,
       lang: PaddleLang,
       adjust_points: bool = False,
     ) -> ExtractedResult:
@@ -51,6 +52,7 @@ class DocExtractor:
     return ExtractedResult(
       rotation=raw_optimizer.rotation,
       layouts=layouts,
+      extracted_image=image,
       adjusted_image=raw_optimizer.adjusted_image,
     )
 
@@ -104,7 +106,7 @@ class DocExtractor:
     for order, fragment in zip(orders, fragments):
       fragment.order = order
 
-  def _get_layouts(self, source: ImageFile) -> list[Layout]:
+  def _get_layouts(self, source: Image) -> list[Layout]:
     # about source parameter to see:
     # https://github.com/opendatalab/DocLayout-YOLO/blob/7c4be36bc61f11b67cf4a44ee47f3c41e9800a91/doclayout_yolo/data/build.py#L157-L175
     det_res = self._get_yolo().predict(
@@ -149,10 +151,16 @@ class DocExtractor:
     for layout in layouts:
       layout.fragments.sort(key=lambda x: x.order)
 
-    layouts = [layout for layout in layouts if len(layout.fragments) > 0]
-    layouts.sort(key=lambda x: x.fragments[0].order)
+    layouts.sort(key=self._layout_order)
 
     return layouts
+
+  def _layout_order(self, layout: Layout) -> int:
+    fragments = layout.fragments
+    if len(fragments) == 0:
+      return sys.maxsize
+    else:
+      return fragments[0].order
 
   def _get_ocr(self, lang: PaddleLang) -> PaddleOCR:
     if self._ocr_and_lan is not None:
