@@ -7,18 +7,15 @@ from pathlib import Path
 from PIL.Image import Image
 from transformers import LayoutLMv3ForTokenClassification
 from doclayout_yolo import YOLOv10
-from paddleocr import PaddleOCR
 
 from .layoutreader import prepare_inputs, boxes2inputs, parse_logits
+from .ocr import OCR, PaddleLang
 from .raw_optimizer import RawOptimizer
 from .rectangle import intersection_area, Rectangle
 from .types import ExtractedResult, OCRFragment, LayoutClass, Layout
 from .downloader import download
-from .utils import ensure_dir
+from .utils import ensure_dir, is_space_text
 
-
-# https://github.com/PaddlePaddle/PaddleOCR/blob/2c0c4beb0606819735a16083cdebf652939c781a/paddleocr.py#L108-L157
-PaddleLang = Literal["ch", "en", "korean", "japan", "chinese_cht", "ta", "te", "ka", "latin", "arabic", "cyrillic", "devanagari"]
 
 class DocExtractor:
   def __init__(
@@ -30,7 +27,7 @@ class DocExtractor:
     self._model_dir_path: str = model_dir_path
     self._device: Literal["cpu", "cuda"] = device
     self._order_by_layoutreader: bool = order_by_layoutreader
-    self._ocr_and_lan: tuple[PaddleOCR, PaddleLang] | None = None
+    self._ocr: OCR = OCR(device, os.path.join(model_dir_path, "paddle"))
     self._yolo: YOLOv10 | None = None
     self._layout: LayoutLMv3ForTokenClassification | None = None
 
@@ -60,15 +57,14 @@ class DocExtractor:
       adjusted_image=raw_optimizer.adjusted_image,
     )
 
-  # https://paddlepaddle.github.io/PaddleOCR/latest/quick_start.html#_2
   def _search_orc_fragments(self, image: np.ndarray, lang: PaddleLang) -> Generator[OCRFragment, None, None]:
     index: int = 0
-    # about img parameter to see
-    # https://github.com/PaddlePaddle/PaddleOCR/blob/2c0c4beb0606819735a16083cdebf652939c781a/paddleocr.py#L582-L619
-    for item in self._get_ocr(lang).ocr(img=image, cls=True):
+    for item in self._ocr.do(lang, image):
       for line in item:
         react: list[list[float]] = line[0]
         text, rank = line[1]
+        if is_space_text(text):
+          continue
         yield OCRFragment(
           order=index,
           text=text,
@@ -144,33 +140,56 @@ class DocExtractor:
     return layouts
 
   def _layouts_matched_by_fragments(self, fragments: list[OCRFragment], layouts: list[Layout]):
-    layout_areas: list[float] = [
-      layout.rect.area
-      for layout in layouts
-    ]
+    layouts_group = self._split_layouts_by_group(layouts)
     for fragment in fragments:
-      fragment_area = fragment.rect.area
-      min_layout_area: float = float("inf")
-      min_layout_area_index: int = -1
-
-      for i, layout in enumerate(layouts):
-        area_rate = intersection_area(fragment.rect, layout.rect) / fragment_area
-        if area_rate < 0.95:
-          continue
-        layout_area = layout_areas[i]
-        if layout_area < min_layout_area:
-          min_layout_area = layout_area
-          min_layout_area_index = i
-
-      if min_layout_area_index != -1:
-        layouts[min_layout_area_index].fragments.append(fragment)
+      for sub_layouts in layouts_group:
+        layout, area_rate = self._find_matched_layout(fragment, sub_layouts)
+        if area_rate >= 0.95 and layout is not None:
+          layout.fragments.append(fragment)
+          break
 
     for layout in layouts:
       layout.fragments.sort(key=lambda x: x.order)
 
+    layouts = [layout for layout in layouts if self._should_keep_layout(layout)]
     layouts.sort(key=self._layout_order)
 
     return layouts
+
+  def _split_layouts_by_group(self, layouts: list[Layout]):
+    texts_layouts: list[Layout] = []
+    abandon_layouts: list[Layout] = []
+
+    for layout in layouts:
+      cls = layout.cls
+      if cls == LayoutClass.TITLE or \
+         cls == LayoutClass.PLAIN_TEXT or \
+         cls == LayoutClass.FIGURE_CAPTION or \
+         cls == LayoutClass.TABLE_CAPTION or \
+         cls == LayoutClass.TABLE_FOOTNOTE or \
+         cls == LayoutClass.FORMULA_CAPTION:
+        texts_layouts.append(layout)
+      elif cls == LayoutClass.ABANDON:
+        abandon_layouts.append(layout)
+
+    return texts_layouts, abandon_layouts
+
+  def _find_matched_layout(self, fragment: OCRFragment, layouts: list[Layout]) -> tuple[Layout | None, float]:
+    if len(layouts) == 0:
+      return None, 0.0
+
+    max_area: float = float("-inf")
+    max_layout_index: int = -1
+    for i, layout in enumerate(layouts):
+      area = intersection_area(fragment.rect, layout.rect)
+      if area > max_area:
+        max_area = area
+        max_layout_index = i
+
+    layout = layouts[max_layout_index]
+    area_rate = max_area / fragment.rect.area
+
+    return layout, area_rate
 
   def _layout_order(self, layout: Layout) -> int:
     fragments = layout.fragments
@@ -178,29 +197,6 @@ class DocExtractor:
       return sys.maxsize
     else:
       return fragments[0].order
-
-  def _get_ocr(self, lang: PaddleLang) -> PaddleOCR:
-    if self._ocr_and_lan is not None:
-      ocr, origin_lang = self._ocr_and_lan
-      if lang == origin_lang:
-        return ocr
-
-    ocr = PaddleOCR(
-      lang=lang,
-      use_angle_cls=True,
-      use_gpu=self._device.startswith("cuda"),
-      det_model_dir=ensure_dir(
-        os.path.join(self._model_dir_path, "paddle", "det"),
-      ),
-      rec_model_dir=ensure_dir(
-        os.path.join(self._model_dir_path, "paddle", "rec"),
-      ),
-      cls_model_dir=ensure_dir(
-        os.path.join(self._model_dir_path, "paddle", "cls"),
-      ),
-    )
-    self._ocr_and_lan = (ocr, lang)
-    return ocr
 
   def _get_yolo(self) -> YOLOv10:
     if self._yolo is None:
@@ -223,6 +219,16 @@ class DocExtractor:
         local_files_only=os.path.exists(os.path.join(cache_dir, "models--hantian--layoutreader")),
       )
     return self._layout
+
+  def _should_keep_layout(self, layout: Layout) -> bool:
+    if len(layout.fragments) > 0:
+      return True
+    cls = layout.cls
+    return (
+      cls == LayoutClass.FIGURE or
+      cls == LayoutClass.TABLE or
+      cls == LayoutClass.ISOLATE_FORMULA
+    )
 
   def _collect_rate_boxes(self, fragments: list[OCRFragment]):
     boxes = self._get_boxes(fragments)
