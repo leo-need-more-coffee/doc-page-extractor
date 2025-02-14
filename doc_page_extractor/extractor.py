@@ -18,16 +18,18 @@ from .utils import ensure_dir
 
 
 # https://github.com/PaddlePaddle/PaddleOCR/blob/2c0c4beb0606819735a16083cdebf652939c781a/paddleocr.py#L108-L157
-type PaddleLang = Literal["ch", "en", "korean", "japan", "chinese_cht", "ta", "te", "ka", "latin", "arabic", "cyrillic", "devanagari"]
+PaddleLang = Literal["ch", "en", "korean", "japan", "chinese_cht", "ta", "te", "ka", "latin", "arabic", "cyrillic", "devanagari"]
 
 class DocExtractor:
   def __init__(
       self,
       model_dir_path: str,
       device: Literal["cpu", "cuda"] = "cpu",
+      order_by_layoutreader: bool = True,
     ):
     self._model_dir_path: str = model_dir_path
     self._device: Literal["cpu", "cuda"] = device
+    self._order_by_layoutreader: bool = order_by_layoutreader
     self._ocr_and_lan: tuple[PaddleOCR, PaddleLang] | None = None
     self._yolo: YOLOv10 | None = None
     self._layout: LayoutLMv3ForTokenClassification | None = None
@@ -43,8 +45,10 @@ class DocExtractor:
     fragments = list(self._search_orc_fragments(raw_optimizer.image_np, lang))
     raw_optimizer.receive_raw_fragments(fragments)
 
-    width, height = raw_optimizer.image.size
-    self._order_fragments(width, height, fragments)
+    if self._order_by_layoutreader:
+      width, height = raw_optimizer.image.size
+      self._order_fragments(width, height, fragments)
+
     layouts = self._get_layouts(raw_optimizer.image)
     layouts = self._layouts_matched_by_fragments(fragments, layouts)
     raw_optimizer.receive_raw_layouts(layouts)
@@ -58,6 +62,7 @@ class DocExtractor:
 
   # https://paddlepaddle.github.io/PaddleOCR/latest/quick_start.html#_2
   def _search_orc_fragments(self, image: np.ndarray, lang: PaddleLang) -> Generator[OCRFragment, None, None]:
+    index: int = 0
     # about img parameter to see
     # https://github.com/PaddlePaddle/PaddleOCR/blob/2c0c4beb0606819735a16083cdebf652939c781a/paddleocr.py#L582-L619
     for item in self._get_ocr(lang).ocr(img=image, cls=True):
@@ -65,7 +70,7 @@ class DocExtractor:
         react: list[list[float]] = line[0]
         text, rank = line[1]
         yield OCRFragment(
-          order=0,
+          order=index,
           text=text,
           rank=rank,
           rect=Rectangle(
@@ -75,6 +80,7 @@ class DocExtractor:
             lb=(react[3][0], react[3][1]),
           ),
         )
+        index += 1
 
   def _order_fragments(self, width: int, height: int, fragments: list[OCRFragment]):
     layout_model = self._get_layout()
@@ -138,15 +144,26 @@ class DocExtractor:
     return layouts
 
   def _layouts_matched_by_fragments(self, fragments: list[OCRFragment], layouts: list[Layout]):
+    layout_areas: list[float] = [
+      layout.rect.area
+      for layout in layouts
+    ]
     for fragment in fragments:
-      max_area: float = 0.0
-      max_layout_index: int = 0
+      fragment_area = fragment.rect.area
+      min_layout_area: float = float("inf")
+      min_layout_area_index: int = -1
+
       for i, layout in enumerate(layouts):
-        area = intersection_area(fragment.rect, layout.rect)
-        if area > max_area:
-          max_area = area
-          max_layout_index = i
-      layouts[max_layout_index].fragments.append(fragment)
+        area_rate = intersection_area(fragment.rect, layout.rect) / fragment_area
+        if area_rate < 0.95:
+          continue
+        layout_area = layout_areas[i]
+        if layout_area < min_layout_area:
+          min_layout_area = layout_area
+          min_layout_area_index = i
+
+      if min_layout_area_index != -1:
+        layouts[min_layout_area_index].fragments.append(fragment)
 
     for layout in layouts:
       layout.fragments.sort(key=lambda x: x.order)
