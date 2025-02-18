@@ -10,7 +10,6 @@ from .rectangle import Rectangle
 
 _TINY_ROTATION = 0.005 # below this angle, we consider the text is horizontal
 
-
 @dataclass
 class _RotationContext:
   to_origin: RotationAdjuster
@@ -47,9 +46,9 @@ class RawOptimizer:
   def image_np(self) -> np.ndarray:
     return np.array(self._raw)
 
-  def receive_raw_fragments(self, fragments: list[OCRFragment]):
+  def receive_raw_fragments(self, fragments: list[OCRFragment], orc_fragments: list[OCRFragment]):
     self._fragments = fragments
-    self._rotation = calculate_rotation(fragments)
+    self._rotation = calculate_rotation(orc_fragments)
 
     if abs(self._rotation) < _TINY_ROTATION:
       return
