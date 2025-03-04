@@ -1,22 +1,34 @@
+import numpy as np
+
 from typing import Iterable
 from shapely.geometry import Polygon
+from PIL.Image import new, Image, Resampling
 from .types import Layout, OCRFragment
-from .rectangle import Rectangle
+from .ocr import OCR, PaddleLang
+from .rectangle import Point, Rectangle
+from .utils import overlap_rate
 
 
 _MIN_RATE = 0.5
 
-def correct_ocr(
-    layout: Layout,
-    layout_fragments: Iterable[OCRFragment],
-    cropped_fragments: Iterable[OCRFragment],
-  ) -> list[OCRFragment]:
-
+def correct_fragments(ocr: OCR, source: Image, layout: Layout, lang: PaddleLang):
+  x1, y1, x2, y2 = layout.rect.wrapper
+  image: Image = source.crop((
+    round(x1), round(y1),
+    round(x2), round(y2),
+  ))
+  image, dx, dy, scale = _adjust_image(image)
+  image_np = np.array(image)
+  ocr_fragments = list(ocr.search_fragments(image_np, lang))
   corrected_fragments: list[OCRFragment] = []
+
+  for fragment in ocr_fragments:
+    _apply_fragment(fragment.rect, layout, dx, dy, scale)
+
   matched_fragments, not_matched_fragments = _match_fragments(
     zone_rect=layout.rect,
-    fragments1=[_relative_layout(layout, f, False) for f in layout_fragments],
-    fragments2=cropped_fragments,
+    fragments1=layout.fragments,
+    fragments2=ocr_fragments,
   )
   for fragment1, fragment2 in matched_fragments:
     if fragment1.rank > fragment2.rank:
@@ -25,28 +37,51 @@ def correct_ocr(
       corrected_fragments.append(fragment2)
 
   corrected_fragments.extend(not_matched_fragments)
-  corrected_fragments = [_relative_layout(layout, f, True) for f in corrected_fragments]
+  layout.fragments = corrected_fragments
 
-  return corrected_fragments
+def _adjust_image(image: Image) -> tuple[Image, int, int, float]:
+  # after testing, adding white borders to images can reduce
+  # the possibility of some text not being recognized
+  border_size: int = 50
+  adjusted_size: int = 1024 - 2 * border_size
+  width, height = image.size
+  core_width = float(max(adjusted_size, width))
+  core_height = float(max(adjusted_size, height))
 
-def _relative_layout(layout: Layout, fragment: OCRFragment, addition: bool) -> OCRFragment:
-  dx, dy = layout.rect.lt
-  if not addition:
-    dx, dy = -dx, -dy
+  scale_x = core_width / width
+  scale_y = core_height / height
+  scale = min(scale_x, scale_y)
+  adjusted_width = width * scale
+  adjusted_height = height * scale
 
-  rect = fragment.rect
-  rect = Rectangle(
-    lt=(rect.lt[0] + dx, rect.lt[1] + dy),
-    rt=(rect.rt[0] + dx, rect.rt[1] + dy),
-    lb=(rect.lb[0] + dx, rect.lb[1] + dy),
-    rb=(rect.rb[0] + dx, rect.rb[1] + dy),
-  )
-  return OCRFragment(
-    order=fragment.order,
-    text=fragment.text,
-    rank=fragment.rank,
-    rect=rect,
-  )
+  dx = (core_width - adjusted_width) / 2.0
+  dy = (core_height - adjusted_height) / 2.0
+  dx = round(dx) + border_size
+  dy = round(dy) + border_size
+
+  if scale != 1.0:
+    width = round(width * scale)
+    height = round(height * scale)
+    image = image.resize((width, height), Resampling.BICUBIC)
+
+  width = round(core_width) + 2 * border_size
+  height = round(core_height) + 2 * border_size
+  new_image = new("RGB", (width, height), (255, 255, 255))
+  new_image.paste(image, (dx, dy))
+
+  return new_image, dx, dy, scale
+
+def _apply_fragment(rect: Rectangle, layout: Layout, dx: int, dy: int, scale: float):
+  rect.lt = _apply_point(rect.lt, layout, dx, dy, scale)
+  rect.lb = _apply_point(rect.lb, layout, dx, dy, scale)
+  rect.rb = _apply_point(rect.rb, layout, dx, dy, scale)
+  rect.rt = _apply_point(rect.rt, layout, dx, dy, scale)
+
+def _apply_point(point: Point, layout: Layout, dx: int, dy: int, scale: float) -> Point:
+  x, y = point
+  x = (x - dx) / scale + layout.rect.lt[0]
+  y = (y - dy) / scale + layout.rect.lt[1]
+  return x, y
 
 def _match_fragments(
     zone_rect: Rectangle,
@@ -70,11 +105,7 @@ def _match_fragments(
 
     for j, fragment2 in enumerate(fragments2):
       polygon2 = Polygon(fragment2.rect)
-      intersection = polygon2.intersection(polygon1)
-      intersection_area = 0.0
-      if not intersection.is_empty:
-        intersection_area = intersection.area
-      rate = intersection_area / polygon1.area
+      rate = overlap_rate(polygon1, polygon2)
       if rate < _MIN_RATE:
         continue
 

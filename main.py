@@ -8,7 +8,7 @@ def main():
   project_path = os.path.dirname(__file__)
   model_path = os.path.join(project_path, "model")
   plot_path = os.path.join(project_path, "output")
-  image_path = os.path.join(project_path, "tests", "images", "lost-citation.png")
+  image_path = os.path.join(project_path, "tests", "images", "citation.png")
   os.makedirs(model_path, exist_ok=True)
   os.makedirs(plot_path, exist_ok=True)
 
@@ -16,21 +16,21 @@ def main():
 
   with Image.open(image_path) as image:
     result = extractor.extract(image, "ch")
-    plot_image: Image
+    plot_image: Image.Image
     if result.adjusted_image is None:
       plot_image = image.copy()
     else:
       plot_image = result.adjusted_image
 
     plot(plot_image, result.layouts)
-    clip_image = clip(result, result.layouts[2], 120.0, 240.0)
+    clip_image = clip(result, result.layouts[0], 120.0, 240.0)
     plot_image.save(os.path.join(plot_path, "plot.png"))
     clip_image.save(os.path.join(plot_path, "clip.png"))
 
     for layout in result.layouts:
       print("\n", layout.cls)
       for fragment in layout.fragments:
-        print(fragment.rect, fragment.text)
+        print(fragment.text, fragment.rect.wrapper)
 
 if __name__ == "__main__":
   main()
