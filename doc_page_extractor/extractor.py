@@ -5,7 +5,6 @@ from typing import Literal, Iterable
 from pathlib import Path
 from PIL.Image import Image
 from transformers import LayoutLMv3ForTokenClassification
-from shapely.geometry import Polygon
 from doclayout_yolo import YOLOv10
 
 from .layoutreader import prepare_inputs, boxes2inputs, parse_logits
@@ -15,7 +14,8 @@ from .raw_optimizer import RawOptimizer
 from .rectangle import intersection_area, Rectangle
 from .types import ExtractedResult, OCRFragment, LayoutClass, Layout
 from .downloader import download
-from .utils import ensure_dir, overlap_rate
+from .overlap import regroup_lines, remove_overlap_layouts
+from .utils import ensure_dir
 
 
 class DocExtractor:
@@ -50,8 +50,8 @@ class DocExtractor:
     raw_optimizer.receive_raw_fragments(fragments)
 
     layouts = self._get_layouts(raw_optimizer.image)
-    layouts = self._remove_overlap_layouts(layouts)
     layouts = self._layouts_matched_by_fragments(fragments, layouts)
+    layouts = remove_overlap_layouts(layouts)
 
     if self._ocr_for_each_layouts:
       self._correct_fragments_by_ocr_layouts(raw_optimizer.image, layouts, lang)
@@ -64,6 +64,7 @@ class DocExtractor:
 
     layouts = [layout for layout in layouts if self._should_keep_layout(layout)]
     for layout in layouts:
+      layout.fragments = regroup_lines(layout.fragments)
       layout.fragments.sort(key=lambda fragment: fragment.order)
 
     layouts = self._sort_layouts(layouts)
@@ -106,29 +107,6 @@ class DocExtractor:
       layouts.append(Layout(cls, rect, []))
 
     return layouts
-
-  def _remove_overlap_layouts(self, layouts: list[Layout]) -> list[Layout]:
-    overlap_layouts: list[Layout] = []
-    not_overlap_layouts: list[Layout] = []
-
-    for layout1 in layouts:
-      rates: list[float] = []
-      for layout2 in layouts:
-        if layout1 == layout2 or layout2 in overlap_layouts:
-          continue
-        rate = overlap_rate(
-          polygon1=Polygon(layout1.rect),
-          polygon2=Polygon(layout2.rect),
-        )
-        if rate > 0.0:
-          rates.append(rate)
-      if len(rates) > 0 and all(x > 0.99 for x in rates):
-        # all overlap layouts is belongs to it
-        overlap_layouts.append(layout1)
-      else:
-        not_overlap_layouts.append(layout1)
-
-    return not_overlap_layouts
 
   def _layouts_matched_by_fragments(self, fragments: list[OCRFragment], layouts: list[Layout]):
     layouts_group = self._split_layouts_by_group(layouts)
