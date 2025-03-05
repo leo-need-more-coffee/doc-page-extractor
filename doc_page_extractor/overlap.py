@@ -3,45 +3,62 @@ from shapely.geometry import Polygon
 from .types import Layout, OCRFragment
 from .rectangle import Rectangle
 
+
+_INCLUDES_MIN_RATE = 0.99
+
 def remove_overlap_layouts(layouts: list[Layout]) -> list[Layout]:
-  includes_min_rate = 0.99
-  removed_indexes: set[int] = set()
-
-  for i, layout1 in enumerate(layouts):
-    if i in removed_indexes:
-      continue
-
-    polygon1 = Polygon(layout1.rect)
-    rates: list[float] = []
-    includes_layouts: list[Layout] = []
-    includes_layout_indexes: list[int] = []
-
-    for j, layout2 in enumerate(layouts):
-      if layout1 == layout2 or j in removed_indexes:
+  ctx = _OverlapMatrixContext(layouts)
+  # the reason for repeating this multiple times is that deleting a layout
+  # may cause its parent layout to change from an originally non-deletable
+  # state to a deletable state.
+  while True:
+    removed_count = len(ctx.removed_indexes)
+    for i, layout in enumerate(layouts):
+      if i in ctx.removed_indexes or \
+         any(0.0 < rate < _INCLUDES_MIN_RATE for rate in ctx.rates_with_other(i)) or \
+         all(0.0 == rate for rate in ctx.rates_with_other(i)):
         continue
-      rate = overlap_rate(
-        polygon1=polygon1,
-        polygon2=Polygon(layout2.rect),
-      )
-      if rate > 0.0:
-        rates.append(rate)
-        includes_layouts.append(layout2)
-        includes_layout_indexes.append(j)
 
-    if len(rates) == 0 or not all(x > includes_min_rate for x in rates):
-      pass
+      if len(layout.fragments) == 0:
+        ctx.removed_indexes.add(i)
+      else:
+        for j in ctx.search_includes_indexes(i):
+          ctx.removed_indexes.add(j)
+          layout.fragments.extend(layouts[j].fragments)
 
-    elif len(layout1.fragments) == 0:
-      removed_indexes.add(i)
-    else:
-      removed_indexes.update(includes_layout_indexes)
-      for layout in includes_layouts:
-        layout1.fragments.extend(layout.fragments)
+    if len(ctx.removed_indexes) == removed_count:
+      break
 
   return [
     layout for i, layout in enumerate(layouts)
-    if i not in removed_indexes
+    if i not in ctx.removed_indexes
   ]
+
+class _OverlapMatrixContext:
+  def __init__(self, layouts: list[Layout]):
+    length: int = len(layouts)
+    polygons: list[Polygon] = [Polygon(layout.rect) for layout in layouts]
+    self.rate_matrix: list[list[float]] = [[1.0 for _ in range(length)] for _ in range(length)]
+    self.removed_indexes: set[int] = set()
+    for i in range(length):
+      polygon1 = polygons[i]
+      rates = self.rate_matrix[i]
+      for j in range(length):
+        if i != j:
+          polygon2 = polygons[j]
+          rates[j] = overlap_rate(polygon1, polygon2)
+
+  def rates_with_other(self, index: int):
+    for i, rate in enumerate(self.rate_matrix[index]):
+      if i != index and i not in self.removed_indexes:
+        yield rate
+
+  def search_includes_indexes(self, index: int):
+    for i, rate in enumerate(self.rate_matrix[index]):
+      if i != index and \
+         i not in self.removed_indexes and \
+         rate >= _INCLUDES_MIN_RATE:
+        yield i
 
 def regroup_lines(origin_fragments: list[OCRFragment]) -> list[OCRFragment]:
   fragments: list[OCRFragment] = []
