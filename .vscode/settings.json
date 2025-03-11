@@ -11,11 +11,14 @@
     "imgsz",
     "layoutreader",
     "ndarray",
+    "onnxocr",
+    "OONX",
     "paddleocr",
     "paddlepaddle",
+    "unclip",
     "xyxy"
   ],
   "pylint.args": [
-    "--generate-members"
-  ]
+    "--generated-member=cv2"
+  ],
 }
