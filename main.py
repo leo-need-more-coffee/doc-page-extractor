@@ -12,7 +12,10 @@ def main():
   os.makedirs(model_path, exist_ok=True)
   os.makedirs(plot_path, exist_ok=True)
 
-  extractor = DocExtractor(model_path, "cpu")
+  extractor = DocExtractor(
+    model_dir_path=model_path,
+    device="cpu",
+  )
 
   with Image.open(image_path) as image:
     result = extractor.extract(image)
