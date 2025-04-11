@@ -1,14 +1,14 @@
 import os
 
 from PIL import Image
-from doc_page_extractor import plot, clip, DocExtractor
+from doc_page_extractor import plot, clip, DocExtractor, FormulaLayout
 
 
 def main():
   project_path = os.path.dirname(__file__)
   model_path = os.path.join(project_path, "model")
   plot_path = os.path.join(project_path, "output")
-  image_path = os.path.join(project_path, "tests", "images", "double_column.png")
+  image_path = os.path.join(project_path, "tests", "images", "formula.png")
   os.makedirs(model_path, exist_ok=True)
   os.makedirs(plot_path, exist_ok=True)
 
@@ -32,8 +32,11 @@ def main():
 
     for layout in result.layouts:
       print("\n", layout.cls)
-      for fragment in layout.fragments:
-        print(fragment.text, fragment.rect.wrapper)
+      if isinstance(layout, FormulaLayout):
+        print("LaTeX:", layout.latex)
+      else:
+        for fragment in layout.fragments:
+          print(fragment.text, fragment.rect.wrapper)
 
 if __name__ == "__main__":
   main()
