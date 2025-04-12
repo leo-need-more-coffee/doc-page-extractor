@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from typing import Literal
-from enum import Enum
+from enum import auto, Enum
 from PIL.Image import Image
 from .rectangle import Rectangle
+
 
 @dataclass
 class OCRFragment:
@@ -23,6 +24,11 @@ class LayoutClass(Enum):
   ISOLATE_FORMULA = 8
   FORMULA_CAPTION = 9
 
+class TableLayoutParsedFormat(Enum):
+  LATEX = auto()
+  MARKDOWN = auto()
+  HTML = auto()
+
 @dataclass
 class BaseLayout:
   rect: Rectangle
@@ -36,18 +42,22 @@ class PlainLayout(BaseLayout):
     LayoutClass.ABANDON,
     LayoutClass.FIGURE,
     LayoutClass.FIGURE_CAPTION,
-    LayoutClass.TABLE,
     LayoutClass.TABLE_CAPTION,
     LayoutClass.TABLE_FOOTNOTE,
     LayoutClass.FORMULA_CAPTION,
   ]
 
 @dataclass
+class TableLayout(BaseLayout):
+  parsed: tuple[str, TableLayoutParsedFormat] | None
+  cls: LayoutClass.TABLE
+
+@dataclass
 class FormulaLayout(BaseLayout):
   latex: str | None
   cls: LayoutClass.ISOLATE_FORMULA
 
-Layout = PlainLayout | FormulaLayout
+Layout = PlainLayout | TableLayout | FormulaLayout
 
 @dataclass
 class ExtractedResult:
