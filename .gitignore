@@ -1,4 +1,5 @@
 .DS_Store
+/doc_page_extractor/struct_eqtable
 /model
 /output
 /test/output

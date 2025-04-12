@@ -20,3 +20,5 @@ conda activate ./.venv
 pip install --upgrade pip
 pip install -r requirements.txt
 pip install onnxruntime==1.21.0
+
+scripts/sync-struct-eqtable.sh
