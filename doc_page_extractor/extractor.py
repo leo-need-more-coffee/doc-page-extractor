@@ -1,15 +1,14 @@
-import os
 
 from typing import Literal, Generator
-from pathlib import Path
 from PIL.Image import Image
 from doclayout_yolo import YOLOv10
+from logging import Logger, getLogger
 
+from .models import HuggingfaceModelsDownloader
 from .ocr import OCR
 from .ocr_corrector import correct_fragments
 from .raw_optimizer import RawOptimizer
 from .rectangle import intersection_area, Rectangle
-from .downloader import download
 from .table import Table
 from .latex import LaTeX
 from .layout_order import LayoutOrder
@@ -17,6 +16,7 @@ from .overlap import merge_fragments_as_line, remove_overlap_layouts
 from .clipper import clip_from_image
 from .types import (
   ExtractedResult,
+  ModelsDownloader,
   OCRFragment,
   TableLayoutParsedFormat,
   Layout,
@@ -30,13 +30,17 @@ from .types import (
 class DocExtractor:
   def __init__(
       self,
-      model_dir_path: str,
+      model_cache_dir: str | None = None,
       device: Literal["cpu", "cuda"] = "cpu",
       ocr_for_each_layouts: bool = True,
       extract_formula: bool = True,
       extract_table_format: TableLayoutParsedFormat | None = None,
+      models_downloader: ModelsDownloader | None = None,
+      logger: Logger | None = None,
     ):
-    self._model_dir_path: str = model_dir_path
+    self._logger = logger or getLogger(__name__)
+    self._models_downloader = models_downloader or HuggingfaceModelsDownloader(self._logger, model_cache_dir)
+
     self._device: Literal["cpu", "cuda"] = device
     self._ocr_for_each_layouts: bool = ocr_for_each_layouts
     self._extract_formula: bool = extract_formula
@@ -44,17 +48,17 @@ class DocExtractor:
     self._yolo: YOLOv10 | None = None
     self._ocr: OCR = OCR(
       device=device,
-      model_dir_path=os.path.join(model_dir_path, "onnx_ocr"),
+      get_model_dir=self._models_downloader.onnx_ocr,
     )
     self._table: Table = Table(
       device=device,
-      model_path=os.path.join(model_dir_path, "struct_eqtable"),
+      get_model_dir=self._models_downloader.struct_eqtable,
     )
     self._latex: LaTeX = LaTeX(
-      model_path=os.path.join(model_dir_path, "latex"),
+      get_model_dir=self._models_downloader.latex,
     )
     self._layout_order: LayoutOrder = LayoutOrder(
-      model_path=os.path.join(model_dir_path, "layoutreader"),
+      get_model_dir=self._models_downloader.layoutreader,
     )
 
   def extract(
@@ -191,14 +195,8 @@ class DocExtractor:
 
   def _get_yolo(self) -> YOLOv10:
     if self._yolo is None:
-      base_path = os.path.join(self._model_dir_path, "yolo")
-      os.makedirs(base_path, exist_ok=True)
-      yolo_model_url = "https://huggingface.co/opendatalab/PDF-Extract-Kit-1.0/resolve/main/models/Layout/YOLO/doclayout_yolo_ft.pt"
-      yolo_model_name = "doclayout_yolo_ft.pt"
-      yolo_model_path = Path(os.path.join(base_path, yolo_model_name))
-      if not yolo_model_path.exists():
-        download(yolo_model_url, yolo_model_path)
-      self._yolo = YOLOv10(str(yolo_model_path))
+      model_path = self._models_downloader.yolo()
+      self._yolo = YOLOv10(str(model_path))
     return self._yolo
 
   def _should_keep_layout(self, layout: Layout) -> bool:

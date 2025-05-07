@@ -2,9 +2,10 @@ import os
 
 from PIL import Image
 from doc_page_extractor import plot, clip, DocExtractor, TableLayout, FormulaLayout
-
+import logging
 
 def main():
+  logging.basicConfig(level=logging.INFO)
   project_path = os.path.dirname(__file__)
   model_path = os.path.join(project_path, "model")
   plot_path = os.path.join(project_path, "output")
@@ -13,7 +14,7 @@ def main():
   os.makedirs(plot_path, exist_ok=True)
 
   extractor = DocExtractor(
-    model_dir_path=model_path,
+    # model_cache_dir=model_path,
     device="cpu",
     extract_formula=True,
   )
