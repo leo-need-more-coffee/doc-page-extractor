@@ -15,7 +15,7 @@ class TestGroup(unittest.TestCase):
     layouts: list[tuple[LayoutClass, list[str]]]
 
     with Image.open(image_path) as image:
-      result = extractor.extract(image, "ch")
+      result = extractor.extract(image, extract_formula=False)
       layouts = [self._format_Layout(layout) for layout in result.layouts]
 
     self.assertEqual(layouts, [

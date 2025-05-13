@@ -1,4 +1,5 @@
 import os
+import time
 
 from PIL import Image
 from doc_page_extractor import plot, clip, DocExtractor, TableLayout, FormulaLayout
@@ -16,11 +17,14 @@ def main():
   extractor = DocExtractor(
     # model_cache_dir=model_path,
     device="cpu",
-    extract_formula=True,
   )
 
   with Image.open(image_path) as image:
-    result = extractor.extract(image)
+    start_time = time.perf_counter()
+    result = extractor.extract(image, extract_formula=True)
+    end_time = time.perf_counter()
+    print("extract time:", end_time - start_time)
+
     plot_image: Image.Image
     if result.adjusted_image is None:
       plot_image = image.copy()
