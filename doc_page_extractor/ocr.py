@@ -5,9 +5,16 @@ import os
 from typing import Literal, Generator
 from dataclasses import dataclass
 from .onnxocr import TextSystem
-from .types import GetModelDir, OCRFragment
+from .types import OCRFragment
 from .rectangle import Rectangle
+from .downloader import download
 from .utils import is_space_text
+
+import pytesseract
+from pytesseract import Output
+from PIL import Image
+import numpy as np
+import cv2
 
 
 _MODELS = (
@@ -46,17 +53,14 @@ class _OONXParams:
   det_model_dir: str
   rec_char_dict_path: str
 
-
-
-
 class OCR:
   def __init__(
       self,
       device: Literal["cpu", "cuda"],
-      get_model_dir: GetModelDir,
+      model_dir_path: str,
     ):
     self._device: Literal["cpu", "cuda"] = device
-    self._get_model_dir: GetModelDir = get_model_dir
+    self._model_dir_path: str = model_dir_path
     self._text_system: TextSystem | None = None
 
   def search_fragments(self, image: np.ndarray) -> Generator[OCRFragment, None, None]:
@@ -82,24 +86,40 @@ class OCR:
       )
 
   def _ocr(self, image: np.ndarray) -> Generator[tuple[list[list[float]], tuple[str, float]], None, None]:
-    text_system = self._get_text_system()
     image = self._preprocess_image(image)
-    dt_boxes, rec_res = text_system(image)
+    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(rgb_image)
 
-    for box, res in zip(dt_boxes, rec_res):
-      yield box.tolist(), res
+    data = pytesseract.image_to_data(pil_image, lang='rus+eng', output_type=Output.DICT)
 
-  def make_model_paths(self) -> list[str]:
-    model_paths = []
-    model_dir = self._get_model_dir()
-    for model_path in _MODELS:
-      file_name = os.path.join(*model_path)
-      model_paths.append(os.path.join(model_dir, file_name))
-    return model_paths
+    n_boxes = len(data['text'])
+    for i in range(n_boxes):
+      text = data['text'][i].strip()
+      conf_str = data['conf'][i]
+      try:
+        conf = float(conf_str)
+      except ValueError:
+        conf = 0.0
+
+      if text and conf > 0:
+        (x, y, w, h) = (data['left'][i], data['top'][i], data['width'][i], data['height'][i])
+        box = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+        yield box, (text, conf / 100.0)
 
   def _get_text_system(self) -> TextSystem:
     if self._text_system is None:
-      model_paths = self.make_model_paths()
+      for model_path in _MODELS:
+        file_path = os.path.join(self._model_dir_path, *model_path)
+        if os.path.exists(file_path):
+          continue
+
+        file_dir_path = os.path.dirname(file_path)
+        os.makedirs(file_dir_path, exist_ok=True)
+
+        url_path = "/".join(model_path)
+        url = f"https://huggingface.co/moskize/OnnxOCR/resolve/main/{url_path}"
+        download(url, file_path)
+
       self._text_system = TextSystem(_OONXParams(
         use_angle_cls=True,
         use_gpu=(self._device != "cpu"),
@@ -122,10 +142,10 @@ class OCR:
         save_crop_res=False,
         rec_algorithm="SVTR_LCNet",
         use_space_char=True,
-        rec_model_dir=model_paths[0],
-        cls_model_dir=model_paths[1],
-        det_model_dir=model_paths[2],
-        rec_char_dict_path=model_paths[3],
+        rec_model_dir=os.path.join(self._model_dir_path, *_MODELS[0]),
+        cls_model_dir=os.path.join(self._model_dir_path, *_MODELS[1]),
+        det_model_dir=os.path.join(self._model_dir_path, *_MODELS[2]),
+        rec_char_dict_path=os.path.join(self._model_dir_path, *_MODELS[3]),
       ))
 
     return self._text_system
@@ -141,40 +161,14 @@ class OCR:
       beta=255,
       norm_type=cv2.NORM_MINMAX,
     )
-    if cv2.cuda.getCudaEnabledDeviceCount() > 0:
-      gpu_frame = cv2.cuda.GpuMat()
-      gpu_frame.upload(image)
-      image = cv2.cuda.fastNlMeansDenoisingColored(
-        src=gpu_frame,
-        dst=None,
-        h_luminance=10,
-        photo_render=10,
-        search_window=15,
-        block_size=7,
-      )
-      image = gpu_frame.download()
-    elif cv2.ocl.haveOpenCL():
-      cv2.ocl.setUseOpenCL(True)
-      gpu_frame = cv2.UMat(image)
-      image = cv2.fastNlMeansDenoisingColored(
-        src=gpu_frame,
-        dst=None,
-        h=10,
-        hColor=10,
-        templateWindowSize=7,
-        searchWindowSize=15,
-      )
-      image = image.get()
-    else:
-      image = cv2.fastNlMeansDenoisingColored(
-        src=image,
-        dst=None,
-        h=10,
-        hColor=10,
-        templateWindowSize=7,
-        searchWindowSize=15,
-      )
-
+    image = cv2.fastNlMeansDenoisingColored(
+      src=image,
+      dst=None,
+      h=10,
+      hColor=10,
+      templateWindowSize=7,
+      searchWindowSize=15,
+    )
     # image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) # image to gray
     return image
 
