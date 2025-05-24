@@ -9,7 +9,8 @@ doc page extractor can identify text and format in images and return structured 
 ## Installation
 
 ```shell
-pip install pytesseract                                         ```
+pip install pytesseract
+```
 
 ```shell
 pip install onnxruntime==1.21.0
